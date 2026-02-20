@@ -140,8 +140,10 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
                 }
             }
             db.close();
-            // Reset embedding pipeline to release ONNX native memory
-            resetEmbeddings();
+            // Reset embedding pipeline to release ONNX native memory.
+            // This calls pipeline.dispose() which frees the InferenceSession's
+            // native C++ allocations — not just the JS reference.
+            await resetEmbeddings();
             // Force garbage collection if available (requires --expose-gc)
             if (typeof globalThis.gc === 'function') {
                 globalThis.gc();

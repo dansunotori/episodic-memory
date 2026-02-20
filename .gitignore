@@ -8,3 +8,6 @@ tmp/
 *.db-wal
 .env
 .claude/settings.local.json
+
+# Diagnostic/debugging artifacts
+debug/

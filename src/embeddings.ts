@@ -2,6 +2,12 @@
 // multi-GB ONNX runtime loading in MCP server processes that never search.
 
 let embeddingPipeline: any = null;
+let embeddingCallCount = 0;
+
+// How often to force V8 GC during batch embedding. V8 doesn't know about
+// native ONNX tensor memory, so without periodic GC the small JS wrappers
+// pile up and anchor large native allocations until the process OOMs.
+const GC_EVERY_N_CALLS = 50;
 
 export async function initEmbeddings(): Promise<void> {
   if (!embeddingPipeline) {
@@ -11,12 +17,20 @@ export async function initEmbeddings(): Promise<void> {
       'feature-extraction',
       'Xenova/all-MiniLM-L6-v2'
     );
+    embeddingCallCount = 0;
     console.log('Embedding model loaded');
   }
 }
 
-export function resetEmbeddings(): void {
-  embeddingPipeline = null;
+export async function resetEmbeddings(): Promise<void> {
+  if (embeddingPipeline) {
+    // Pipeline.dispose() releases the ONNX InferenceSession's native C++
+    // memory. Without this, nulling the reference alone leaves the native
+    // session allocated until (if ever) V8 GC collects the JS wrapper.
+    await embeddingPipeline.dispose();
+    embeddingPipeline = null;
+    embeddingCallCount = 0;
+  }
 }
 
 export async function generateEmbedding(text: string): Promise<number[]> {
@@ -34,10 +48,18 @@ export async function generateEmbedding(text: string): Promise<number[]> {
 
   const embedding = Array.from(output.data) as number[];
 
-  // Free the ONNX tensor to prevent unbounded memory growth during batch operations.
-  // dispose() exists at runtime but is missing from @xenova/transformers v2 type definitions.
+  // Release the tensor's native memory if dispose() is available.
   if (typeof output.dispose === 'function') {
     output.dispose();
+  }
+
+  embeddingCallCount++;
+
+  // Periodically force GC to reclaim native ONNX tensor memory. V8 only
+  // tracks JS heap pressure and won't GC aggressively enough on its own
+  // when each ~200-byte JS wrapper anchors a much larger native allocation.
+  if (embeddingCallCount % GC_EVERY_N_CALLS === 0 && typeof globalThis.gc === 'function') {
+    globalThis.gc();
   }
 
   return embedding;

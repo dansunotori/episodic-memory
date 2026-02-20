@@ -17914,6 +17914,8 @@ function initDatabase() {
 
 // src/embeddings.ts
 var embeddingPipeline = null;
+var embeddingCallCount = 0;
+var GC_EVERY_N_CALLS = 50;
 async function initEmbeddings() {
   if (!embeddingPipeline) {
     console.log("Loading embedding model (first run may take time)...");
@@ -17922,6 +17924,7 @@ async function initEmbeddings() {
       "feature-extraction",
       "Xenova/all-MiniLM-L6-v2"
     );
+    embeddingCallCount = 0;
     console.log("Embedding model loaded");
   }
 }
@@ -17937,6 +17940,10 @@ async function generateEmbedding(text) {
   const embedding = Array.from(output.data);
   if (typeof output.dispose === "function") {
     output.dispose();
+  }
+  embeddingCallCount++;
+  if (embeddingCallCount % GC_EVERY_N_CALLS === 0 && typeof globalThis.gc === "function") {
+    globalThis.gc();
   }
   return embedding;
 }

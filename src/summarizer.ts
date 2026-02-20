@@ -51,37 +51,58 @@ async function callClaude(prompt: string, sessionId?: string, useFallback = fals
   const fallbackModel = process.env.EPISODIC_MEMORY_API_MODEL_FALLBACK || 'sonnet';
   const model = useFallback ? fallbackModel : primaryModel;
 
-  for await (const message of query({
+  // query() spawns a full Claude Code subprocess per call (~1-2GB each).
+  // We MUST explicitly dispose after getting the result to kill the subprocess
+  // before the next call starts, otherwise they accumulate to 14GB+.
+  const q = query({
     prompt,
     options: {
       model,
       max_tokens: 4096,
       env: getApiEnv(),
       resume: sessionId,
-      // Don't override systemPrompt when resuming - it uses the original session's prompt
-      // Instead, the prompt itself should provide clear instructions
       ...(sessionId ? {} : {
         systemPrompt: 'Write concise, factual summaries. Output ONLY the summary - no preamble, no "Here is", no "I will". Your output will be indexed directly.'
       })
     } as any
-  })) {
-    if (message && typeof message === 'object' && 'type' in message && message.type === 'result') {
-      const result = (message as any).result;
+  });
 
-      // Check if result is an API error (SDK returns errors as result strings)
-      if (typeof result === 'string' && result.includes('API Error') && result.includes('thinking.budget_tokens')) {
-        if (!useFallback) {
-          console.log(`    ${primaryModel} hit thinking budget error, retrying with ${fallbackModel}`);
-          return await callClaude(prompt, sessionId, true);
+  let resultText = '';
+  try {
+    for await (const message of q) {
+      if (message && typeof message === 'object' && 'type' in message && message.type === 'result') {
+        const result = (message as any).result;
+
+        // Check if result is an API error (SDK returns errors as result strings)
+        if (typeof result === 'string' && result.includes('API Error') && result.includes('thinking.budget_tokens')) {
+          if (!useFallback) {
+            console.log(`    ${primaryModel} hit thinking budget error, retrying with ${fallbackModel}`);
+            resultText = '__RETRY_FALLBACK__';
+            break;
+          }
+          resultText = result;
+          break;
         }
-        // If fallback also fails, return error message
-        return result;
-      }
 
-      return result;
+        resultText = result;
+        break;
+      }
     }
+  } finally {
+    // Kill the subprocess immediately — don't let it linger
+    const asyncDispose = (q as any)[Symbol.asyncDispose];
+    if (typeof asyncDispose === 'function') {
+      try { await asyncDispose.call(q); } catch {}
+    }
+    // Give the subprocess time to actually exit before next call
+    await new Promise(resolve => setTimeout(resolve, 500));
   }
-  return '';
+
+  if (resultText === '__RETRY_FALLBACK__') {
+    return await callClaude(prompt, sessionId, true);
+  }
+
+  return resultText;
 }
 
 function chunkExchanges(exchanges: ConversationExchange[], chunkSize: number): ConversationExchange[][] {
